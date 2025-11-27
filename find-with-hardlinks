@@ -17,22 +17,22 @@ trap 'rm -rf -- "$TMPDIR"' EXIT
 
 export BKT_TTL="${BKT_TTL:-1s}"
 
-declare -a flag_help flag_search_dir flag_print0 flag_inode_sort flag_findarg
+declare -a flag_help flag_search_dir flag_print0 flag_inode_sort
 zparseopts -E -D -F -K -- \
   {h,-help}=flag_help \
   {s,-search_dir}+:=flag_search_dir \
   {0,-print0}=flag_print0 \
-  {i,-inode_sort}=flag_inode_sort \
-  {f,-findarg}+:=flag_findarg
+  {i,-inode_sort}=flag_inode_sort
 
 function usage_and_die {
   echo "$(<< EOF
-Usage: $PROGNAME [options] target_dirs...
+Usage: $PROGNAME [options] -- [additional find args] -- target_dirs...
 
 Search for hardlinks to all files in the directories, listing all files in the
 target directory and all hardlinks in the search dirs.
 
 Args:
+  additional find args - Additional args to pass to find when traversing target_dirs.
   dirs - The directories of files to search for hardlinks of.
 
 Options:
@@ -40,7 +40,12 @@ Options:
   -s, --search_dir dir - The directory to search for hardlinks. Can be repeated.
   -0, --print0 - Outputs files null-delimited.
   -i, --inode_sort - Sort the output by inode number.
-  -f, --findarg arg - Additional args to pass to find when traversing target_dirs.
+
+All search dirs and target dirs must share a mountpoint, and $PROGNAME must be
+run from the root of the mountpoint.
+
+Example:
+  cd /; find-with-hardlinks -i0 -s /home/myuser/tmp/dira -- -name c -- /home/myuser/tmp/dirb
 EOF
   )"
   exit 0
@@ -49,6 +54,22 @@ EOF
 if (( $#flag_help )); then
   usage_and_die
 fi
+
+if [[ $# -lt 3 || "$1" != "--" ]]; then
+  usage_and_die >&2
+fi
+shift  # removes '--'
+
+declare -a findargs
+while [[ $# -ne 0 && "$1" != "--" ]]; do
+  findargs+=( "$1" )
+  shift
+done
+
+if [[ "$1" != "--" ]]; then
+  usage_and_die >&2
+fi
+shift  # removes '--'
 
 declare -a target_dirs
 target_dirs=( "$@" )
@@ -67,9 +88,8 @@ function get_flag_values {
   done
 }
 
-declare -a search_dirs findargs
+declare -a search_dirs
 get_flag_values flag_search_dir search_dirs
-get_flag_values flag_findarg findargs
 
 if [[ ${#target_dirs} -eq 0 ]]; then
   echo "You must specify at least one target directory." >&2
