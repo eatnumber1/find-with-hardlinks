@@ -91,7 +91,7 @@ function () {
   for p in "${search_dirs[@]}" "${target_dirs[@]}"; do
     if [[ ! -e "$p" ]]; then
       echo "Path $p does not exist" >&2
-      usage_and_die
+      usage_and_die >&2
     fi
 
     fs="$(get_filesystem_of "$p")"
@@ -103,7 +103,7 @@ function () {
 
     if [[ "$target_fs" != "$fs" ]]; then
       echo "All search and target dirs must be on the same filesystem" >&2
-      usage_and_die
+      usage_and_die >&2
     fi
   done
 
@@ -115,7 +115,7 @@ function () {
 # where the output files always exist relative to the invoker's cwd.
 if [[ "$PWD" != "$target_fs" ]]; then
   echo "$PROGNAME must be invoked from the root of a mountpoint (cd to $target_fs and try again)" >&2
-  usage_and_die
+  usage_and_die >&2
 fi
 
 # To make the two invocations of bfs below output paths relative to the same
@@ -147,7 +147,6 @@ canonicalize_path_array search_dirs "$target_fs"
 canonicalize_path_array target_dirs "$target_fs"
 
 target_files="$TMPDIR/target_files.txt"
-hardlinks_file="$TMPDIR/hardlinks.txt"
 
 bkt --cwd -- bfs -O4 \
   -xdev -type f \
@@ -156,53 +155,56 @@ bkt --cwd -- bfs -O4 \
   -- "${target_dirs[@]}" \
   > "$target_files"
 
-function select_inodes_of_target_files {
-  function list_inodes_of_target_files {
-    cut \
-      --zero-terminated --delimiter=$'\t' \
-      --fields=1 -- "$target_files" \
-    | tr '\0' '\n'
+function list_hardlinks {
+  function select_inodes_of_target_files {
+    function list_inodes_of_target_files {
+      cut \
+        --zero-terminated --delimiter=$'\t' \
+        --fields=1 -- "$target_files" \
+      | tr '\0' '\n'
+    }
+
+    # Via || : we ignore errors from grep because an empty input is an error,
+    # which occurs if there are no files in the hardlink dirs.
+    grep \
+      --null-data \
+      --fixed-strings --line-regexp \
+      --after-context=1 --no-group-separator \
+      --file=<(list_inodes_of_target_files) \
+    || :
+
+    unfunction list_inodes_of_target_files
   }
 
-  # Via || : we ignore errors from grep because an empty input is an error,
-  # which occurs if there are no files in the hardlink dirs.
-  grep \
-    --null-data \
-    --fixed-strings --line-regexp \
-    --after-context=1 --no-group-separator \
-    --file=<(list_inodes_of_target_files) \
-  || :
+  function merge_every_other_line {
+    awk 'BEGIN { RS = "\0" } { getline b; printf("%s%s\0",$0,b) }'
+  }
 
-  unfunction list_inodes_of_target_files
+  local -a target_dir_exprs
+  function () {
+    local p
+    for p in "${target_dirs[@]}"; do
+      target_dir_exprs+=( -o -path "$p" )
+    done
+  }
+
+  # Find hardlinks
+  #
+  # This works by printing the inode number then the file path on subsequent
+  # lines, then grepping for the inode number with one line of after context.
+  # Then later we use awk to merge the two lines together.
+  #
+  bkt --cwd -- bfs -O4 \
+    -exclude "(" -false "${target_dir_exprs[@]}" ")" \
+    -xdev -type f \
+    -links +1 \
+    -printf '%i\0\t%p\0' \
+    -- "${search_dirs[@]}" \
+  | select_inodes_of_target_files \
+  | merge_every_other_line
+
+  unfunction select_inodes_of_target_files merge_every_other_line
 }
-
-function merge_every_other_line {
-  awk 'BEGIN { RS = "\0" } { getline b; printf("%s%s\0",$0,b) }'
-}
-
-declare -a target_dir_exprs
-function () {
-  local p
-  for p in "${target_dirs[@]}"; do
-    target_dir_exprs+=( -o -path "$p" )
-  done
-}
-
-# Find hardlinks
-#
-# This works by printing the inode number then the file path on subsequent
-# lines, then grepping for the inode number with one line of after context.
-# Then later we use awk to merge the two lines together.
-#
-bkt --cwd -- bfs -O4 \
-  -exclude "(" -false "${target_dir_exprs[@]}" ")" \
-  -xdev -type f \
-  -links +1 \
-  -printf '%i\0\t%p\0' \
-  -- "${search_dirs[@]}" \
-| select_inodes_of_target_files \
-| merge_every_other_line \
-  > "$hardlinks_file"
 
 function list_all_files {
   if (( $#flag_inode_sort )); then
@@ -226,7 +228,7 @@ function list_all_files {
     }
   fi
 
-  cat -- "$hardlinks_file" "$target_files" \
+  cat -- <(list_hardlinks) "$target_files" \
   | inode_sort \
   | cut --zero-terminated --delimiter=$'\t' --fields=2- \
   | convert_for_printing
