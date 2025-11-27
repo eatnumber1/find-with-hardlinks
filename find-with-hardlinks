@@ -150,7 +150,7 @@ function canonicalize_path_array {
     realpath \
       --no-symlinks --canonicalize-existing \
       --zero --relative-to="$relative_to" \
-      -- "$1"
+      -- "$@"
   }
 
   local line
