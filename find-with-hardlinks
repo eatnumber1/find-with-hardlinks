@@ -1,0 +1,241 @@
+#!/bin/zsh
+#set -x
+
+setopt err_exit err_return
+setopt warn_create_global no_unset
+setopt pipe_fail
+
+readonly PROGNAME="${0:t}"
+
+zmodload -F zsh/zutil +b:zparseopts
+zmodload -F zsh/files +b:rm
+
+# Set BKT_CACHE_DIR so we won't save bkt outputs to TMPDIR after we override it.
+BKT_CACHE_DIR="${BKT_CACHE_DIR:-${BKT_TMPDIR:-${TMPDIR:-/tmp}}}"
+TMPDIR="$(mktemp --tmpdir -d "$PROGNAME".XXXXXXX)"
+trap 'rm -rf -- "$TMPDIR"' EXIT
+
+export BKT_TTL="${BKT_TTL:-1s}"
+
+declare -a flag_help flag_search_dir flag_print0 flag_inode_sort flag_findarg
+zparseopts -E -D -F -K -- \
+  {h,-help}=flag_help \
+  {s,-search_dir}+:=flag_search_dir \
+  {0,-print0}=flag_print0 \
+  {i,-inode_sort}=flag_inode_sort \
+  {f,-findarg}+:=flag_findarg
+
+function usage_and_die {
+  echo "$(<< EOF
+Usage: $PROGNAME [options] target_dirs...
+
+Search for hardlinks to all files in the directories, listing all files in the
+target directory and all hardlinks in the search dirs.
+
+Args:
+  dirs - The directories of files to search for hardlinks of.
+
+Options:
+  -h, --help - Print the help message
+  -s, --search_dir dir - The directory to search for hardlinks. Can be repeated.
+  -0, --print0 - Outputs files null-delimited.
+  -i, --inode_sort - Sort the output by inode number.
+  -f, --findarg arg - Additional args to pass to find when traversing target_dirs.
+EOF
+  )"
+  exit 0
+}
+
+if (( $#flag_help )); then
+  usage_and_die
+fi
+
+declare -a target_dirs
+target_dirs=( "$@" )
+
+# Get the value portion of an array-style flag parsed via zparseopts.
+# zparseopts parses repeated flags into ary=( -f a -f b -f c ), this function
+# will return ( a b c ).
+#
+# Usage: get_flag_values flag_ary_name out_ary_name
+function get_flag_values {
+  local -i i
+  local flag_ary_name="$1" out_ary_name="$2"
+  eval "${(q)out_ary_name}=()"
+  for (( i = 2; i <= ${(P)#flag_ary_name}; i += 2 )); do
+    eval "${(q)out_ary_name}+=( \"\${${(q)flag_ary_name}[$i]}\" )"
+  done
+}
+
+declare -a search_dirs findargs
+get_flag_values flag_search_dir search_dirs
+get_flag_values flag_findarg findargs
+
+if [[ ${#target_dirs} -eq 0 ]]; then
+  echo "You must specify at least one target directory." >&2
+  usage_and_die >&2
+fi
+if [[ ${#search_dirs} -eq 0 ]]; then
+  echo "You must specify at least one search directory." >&2
+  usage_and_die >&2
+fi
+
+# Check that all the paths we were provided exist.
+function () {
+  local p
+  for p in "${search_dirs[@]}" "${target_dirs[@]}"; do
+  done
+}
+
+# Check that all the paths we were provided exist on the same filesystem.
+declare target_fs
+function () {
+  function get_filesystem_of {
+    stat -c %m "$1"
+  }
+
+  local fs p
+  for p in "${search_dirs[@]}" "${target_dirs[@]}"; do
+    if [[ ! -e "$p" ]]; then
+      echo "Path $p does not exist" >&2
+      usage_and_die
+    fi
+
+    fs="$(get_filesystem_of "$p")"
+
+    if [[ -z "$target_fs" ]]; then
+      target_fs="$fs"
+      continue
+    fi
+
+    if [[ "$target_fs" != "$fs" ]]; then
+      echo "All search and target dirs must be on the same filesystem" >&2
+      usage_and_die
+    fi
+  done
+
+  unfunction get_filesystem_of
+}
+
+# Because we have to output paths relative to the mountpoint, this tool must be
+# run from the mountpoint. We don't cd into it to preserve find-like behavior
+# where the output files always exist relative to the invoker's cwd.
+if [[ "$PWD" != "$target_fs" ]]; then
+  echo "$PROGNAME must be invoked from the root of a mountpoint (cd to $target_fs and try again)" >&2
+  usage_and_die
+fi
+
+# To make the two invocations of bfs below output paths relative to the same
+# root, we need to make both target_dirs and search_dirs be relative to the
+# mountpoint.
+#
+# Usage: canonicalize_path_array array_name relative_to
+function canonicalize_path_array {
+  local ary="$1" relative_to="$2"
+
+  function canonicalize {
+    realpath \
+      --no-symlinks --canonicalize-existing \
+      --zero --relative-to="$relative_to" \
+      -- "$1"
+  }
+
+  local line
+  local -a temp_ary
+  while IFS='' read -r -d '' line; do
+    temp_ary+=( "$line" )
+  done < <(canonicalize "${(P@)ary}")
+
+  eval "${(q)ary}=( \"\${temp_ary[@]}\" )"
+
+  unfunction canonicalize
+}
+canonicalize_path_array search_dirs "$target_fs"
+canonicalize_path_array target_dirs "$target_fs"
+
+target_files="$TMPDIR/target_files.txt"
+hardlinks_file="$TMPDIR/hardlinks.txt"
+
+bkt --cwd -- bfs -O4 \
+  -xdev -type f \
+  "${findargs[@]}" \
+  -printf '%i\t%p\0' \
+  -- "${target_dirs[@]}" \
+  > "$target_files"
+
+function select_inodes_of_target_files {
+  function list_inodes_of_target_files {
+    cut \
+      --zero-terminated --delimiter=$'\t' \
+      --fields=1 -- "$target_files" \
+    | tr '\0' '\n'
+  }
+
+  # Via || : we ignore errors from grep because an empty input is an error,
+  # which occurs if there are no files in the hardlink dirs.
+  grep \
+    --null-data \
+    --fixed-strings --line-regexp \
+    --after-context=1 --no-group-separator \
+    --file=<(list_inodes_of_target_files) \
+  || :
+
+  unfunction list_inodes_of_target_files
+}
+
+function merge_every_other_line {
+  awk 'BEGIN { RS = "\0" } { getline b; printf("%s%s\0",$0,b) }'
+}
+
+declare -a target_dir_exprs
+function () {
+  local p
+  for p in "${target_dirs[@]}"; do
+    target_dir_exprs+=( -o -path "$p" )
+  done
+}
+
+# Find hardlinks
+#
+# This works by printing the inode number then the file path on subsequent
+# lines, then grepping for the inode number with one line of after context.
+# Then later we use awk to merge the two lines together.
+#
+bkt --cwd -- bfs -O4 \
+  -exclude "(" -false "${target_dir_exprs[@]}" ")" \
+  -xdev -type f \
+  -links +1 \
+  -printf '%i\0\t%p\0' \
+  -- "${search_dirs[@]}" \
+| select_inodes_of_target_files \
+| merge_every_other_line \
+  > "$hardlinks_file"
+
+function list_all_files {
+  if (( $#flag_inode_sort )); then
+    function inode_sort {
+      sort --zero-terminated --numeric-sort --key=1 \
+      | uniq --zero-terminated
+    }
+  else
+    function inode_sort {
+      cat
+    }
+  fi
+
+  if (( $#flag_print0 )); then
+    function convert_for_printing {
+      cat
+    }
+  else
+    function convert_for_printing {
+      tr '\0' '\n'
+    }
+  fi
+
+  cat -- "$hardlinks_file" "$target_files" \
+  | inode_sort \
+  | cut --zero-terminated --delimiter=$'\t' --fields=2- \
+  | convert_for_printing
+}
+list_all_files
