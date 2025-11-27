@@ -252,5 +252,7 @@ function list_all_files {
   | inode_sort \
   | cut --zero-terminated --delimiter=$'\t' --fields=2- \
   | convert_for_printing
+
+  unfunction inode_sort convert_for_printing
 }
 list_all_files
