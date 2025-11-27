@@ -80,13 +80,6 @@ if [[ ${#search_dirs} -eq 0 ]]; then
   usage_and_die >&2
 fi
 
-# Check that all the paths we were provided exist.
-function () {
-  local p
-  for p in "${search_dirs[@]}" "${target_dirs[@]}"; do
-  done
-}
-
 # Check that all the paths we were provided exist on the same filesystem.
 declare target_fs
 function () {
