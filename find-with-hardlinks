@@ -1,4 +1,17 @@
 #!/bin/zsh
+# find-with-hardlinks lists all the files in "target" directories, and
+# additionally lists all the hardlinks to files in the target directories found
+# within given "search" directories.
+#
+# This is useful for e.g. moving files and all their hardlinks between
+# https://github.com/trapexit/mergerfs branches.
+#
+# The tool requires the following to be installed:
+#
+#  * https://www.zsh.org/
+#  * https://github.com/tavianator/bfs
+#  * https://github.com/dimo414/bkt
+
 #set -x
 
 setopt err_exit err_return
