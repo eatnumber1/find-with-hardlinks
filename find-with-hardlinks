@@ -201,7 +201,7 @@ function list_hardlinks {
     # which occurs if there are no files in the hardlink dirs.
     #
     # Per https://www.gnu.org/software/grep/manual/grep.html#Performance,
-    # LC_ALL='C' can improve ripgrep performance, and since we're just looking
+    # LC_ALL='C' can improve grep performance, and since we're just looking
     # for numbers, wide characters is not a concern (even if present, as long
     # as they don't contain embedded nulls, which isn't allowed in UTF-8).
     # https://stackoverflow.com/questions/6907297/can-utf-8-contain-zero-byte
