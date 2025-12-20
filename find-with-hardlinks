@@ -160,29 +160,12 @@ if [[ "$PWD" != "$target_fs" ]]; then
   usage_and_die 1 >&2
 fi
 
-# To make the two invocations of bfs below output paths relative to the same
-# root, we need to make both target_dirs and search_dirs be relative to the
-# mountpoint.
-#
-# Usage: canonicalize_path_array array_name relative_to
-function canonicalize_path_array {
-  local ary="$1" relative_to="$2"
-
-  function canonicalize {
-    realpath \
-      --no-symlinks --canonicalize-existing \
-      --zero --relative-to="$relative_to" \
-      -- "$@"
-  }
-
-  local -a temp_ary
-  temp_ary=( ${(ps:\0:)"$(canonicalize "${(P@)ary}")"} )
-  eval "${(q)ary}=( \"\${temp_ary[@]}\" )"
-
-  unfunction canonicalize
+function canonicalize_paths_stdin {
+ parallel -0Xq -- realpath \
+   --no-symlinks --canonicalize-existing \
+   --zero --relative-to="$target_fs" \
+   --
 }
-canonicalize_path_array search_dirs "$target_fs"
-canonicalize_path_array target_dirs "$target_fs"
 
 target_files="$TMPDIR/target_files.txt"
 
@@ -224,11 +207,34 @@ function list_hardlinks {
     awk 'BEGIN { RS = "\0" } { getline b; printf("%s%s\0",$0,b) }'
   }
 
+  # Usage: canonicalize_target_dir_for_expr dir
+  # Returns:
+  #   appends to array `retary`
+  function canonicalize_target_dir_for_expr {
+    local search_dir target_dir resolved
+    # The find expression must be relative to a start point (one of the
+    # search_dirs), but we don't know which it will be. So we generate paths
+    # for all of them.
+    for search_dir in "${search_dirs[@]}"; do
+      for target_dir in "$@"; do
+        resolved="$(realpath \
+          --no-symlinks --canonicalize-missing \
+          --relative-to="$search_dir" \
+          -- "${target_dir}")"
+        resolved="$search_dir/$resolved"
+        if ([[ ! -e "$resolved" ]]) continue
+        retary+=( "$resolved" )
+      done
+    done
+  }
+
   local -a target_dir_exprs
   function () {
-    local p
+    local p v
+    local -a retary
     for p in "${target_dirs[@]}"; do
-      target_dir_exprs+=( -o -path "$p" )
+      canonicalize_target_dir_for_expr "$p"
+      for v ("${retary[@]}") target_dir_exprs+=( -o -path "$v" )
     done
   }
 
@@ -247,7 +253,7 @@ function list_hardlinks {
   | select_inodes_of_target_files \
   | merge_every_other_line
 
-  unfunction select_inodes_of_target_files merge_every_other_line
+  unfunction select_inodes_of_target_files merge_every_other_line canonicalize_target_dir_for_expr
 }
 
 function list_all_files {
@@ -280,6 +286,7 @@ function list_all_files {
   cat -- /proc/$$/fd/${coproc_fd} "$target_files" \
   | inode_sort \
   | cut --zero-terminated --delimiter=$'\t' --fields=2- \
+  | canonicalize_paths_stdin \
   | convert_for_printing
 
   exec {coproc_fd}<&-
